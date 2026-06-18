@@ -143,19 +143,47 @@ object WifiScanner {
     private fun scanWindows(): List<WifiNetwork> {
         val raw = exec("netsh", "wlan", "show", "networks", "mode=bssid")
         val nets = mutableListOf<WifiNetwork>()
-        val blocks = raw.split(Regex("(?=SSID \\d+ :)")).drop(1)
-        for (b in blocks) {
-            val ls = b.lines()
+        val ssidBlocks = raw.split(Regex("(?=SSID \\d+ :)")).drop(1)
+        for (b in ssidBlocks) {
+            val ls       = b.lines()
             val ssid     = ls.firstOrNull()?.substringAfter(":")?.trim() ?: continue
-            val bssid    = ls.find { it.matches(Regex(".*BSSID \\d+.*:.*")) }
-                ?.substringAfter("BSSID")?.substringAfter(":")?.trim() ?: "00:00:00:00:00:00"
-            val signal   = ls.find { it.trim().startsWith("Signal") }
-                ?.substringAfter(":")?.trim()?.removeSuffix("%")?.toIntOrNull() ?: 0
-            val channel  = ls.find { it.trim().startsWith("Channel") }
-                ?.substringAfter(":")?.trim()?.toIntOrNull() ?: 0
             val security = ls.find { it.trim().startsWith("Authentication") }
                 ?.substringAfter(":")?.trim() ?: "Open"
-            nets += WifiNetwork(ssid, bssid, signal, channel, if (channel > 14) "5 GHz" else "2.4 GHz", security)
+
+            // Each SSID block may have multiple BSSID sub-blocks — parse them all.
+            val bssidIndices = ls.indices.filter { ls[it].matches(Regex(".*BSSID \\d+.*:.*")) }
+            val ranges = bssidIndices.mapIndexed { i, start ->
+                start until (bssidIndices.getOrNull(i + 1) ?: ls.size)
+            }
+
+            for (range in ranges) {
+                val sub     = ls.subList(range.first, range.last)
+                val bssid   = sub[0].substringAfter("BSSID").substringAfter(":").trim()
+                val signal  = sub.find { it.trim().startsWith("Signal") }
+                    ?.substringAfter(":")?.trim()?.removeSuffix("%")?.toIntOrNull() ?: 0
+                val channel = sub.find { it.trim().startsWith("Channel") }
+                    ?.substringAfter(":")?.trim()?.toIntOrNull() ?: 0
+                val radio   = sub.find { it.trim().startsWith("Radio type") }
+                    ?.substringAfter(":")?.trim() ?: ""
+                val band = when {
+                    radio.contains("802.11ac", ignoreCase = true) -> "5 GHz"
+                    radio.contains("802.11ax", ignoreCase = true) && channel > 14 -> "5 GHz"
+                    channel > 14 -> "5 GHz"
+                    else -> "2.4 GHz"
+                }
+                nets += WifiNetwork(ssid, bssid, signal, channel, band, security)
+            }
+
+            // Fallback: no BSSID sub-blocks found (shouldn't happen but keeps old behaviour)
+            if (ranges.isEmpty()) {
+                val bssid   = ls.find { it.matches(Regex(".*BSSID \\d+.*:.*")) }
+                    ?.substringAfter("BSSID")?.substringAfter(":")?.trim() ?: "00:00:00:00:00:00"
+                val signal  = ls.find { it.trim().startsWith("Signal") }
+                    ?.substringAfter(":")?.trim()?.removeSuffix("%")?.toIntOrNull() ?: 0
+                val channel = ls.find { it.trim().startsWith("Channel") }
+                    ?.substringAfter(":")?.trim()?.toIntOrNull() ?: 0
+                nets += WifiNetwork(ssid, bssid, signal, channel, if (channel > 14) "5 GHz" else "2.4 GHz", security)
+            }
         }
         return nets
     }
